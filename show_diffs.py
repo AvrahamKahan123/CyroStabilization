@@ -1,16 +1,18 @@
-import torch, cv2
+import torch
 import numpy as np
-from typing import Union
+from typing import Union, List
 import matplotlib.pyplot as plt
+
+from stabilization import register_stack, align_video, register_stack_2
+from tensor_ops import quantile_per_frame
+from video_editor import save_tensor_as_video, histogram_stretch_to_uint8
 
 FPS=800
 
-def save_background_difference_avi(
+def save_background_difference(
     video: torch.Tensor,
     background: torch.Tensor,
-    output_path: str,
-    fps: int = 30,
-):
+    output_path: str):
     """
     video: torch tensor of shape (T, H, W)
     background: torch tensor of shape (H, W)
@@ -27,24 +29,11 @@ def save_background_difference_avi(
 
     video = video.detach().cpu().float()
     background = background.detach().cpu().float()
-
     diff = torch.abs(video - background)
+    diff = torch.clamp(diff, 0, 255).byte()
+    save_tensor_as_video(diff, output_path)
 
 
-    diff = torch.clamp(diff, 0, 255).byte().numpy()
-
-    T, H, W = diff.shape
-
-    fourcc = cv2.VideoWriter_fourcc(*"XVID")
-    writer = cv2.VideoWriter(output_path, fourcc, fps, (W, H), isColor=False)
-
-    if not writer.isOpened():
-        raise RuntimeError(f"Could not open video writer for {output_path}")
-
-    for i in range(T):
-        writer.write(diff[i])
-
-    writer.release()
 
 def show_frame(frame: Union[torch.Tensor, np.ndarray]):
     if isinstance(frame, torch.Tensor):
@@ -52,9 +41,10 @@ def show_frame(frame: Union[torch.Tensor, np.ndarray]):
     plt.imshow(frame)
     plt.show()
 
-def plot_line(values: Union[torch.Tensor, np.ndarray]):
-    values = values.detach().cpu().numpy()
-    plt.plot(values)
+
+def plot_lines(values: List[torch.Tensor]):
+    for v in values:
+        plt.plot(v.detach().cpu().numpy())
     plt.show()
 
 def plot_differences(y_values: torch.Tensor):
@@ -121,20 +111,43 @@ def plot_fft_spectrum(x: torch.Tensor, fps=FPS):
     plt.grid(alpha=0.3)
     plt.show()
 
+def save_histogram_equalized_video(video: torch.Tensor, output_path: str):
+    video = histogram_stretch_to_uint8(video)
+    save_tensor_as_video(video.cpu(), output_path)
+
+def find_x_shifts_and_y_shifts(video_tensor: torch.Tensor, background: torch.Tensor):
+    movements = register_stack_2(video_tensor, background, subpixel=True, phase=False, plot_frame=1)
+    return movements
+
+def see_differences(frames, middle_frame):
+    frames_minus_median = torch.abs(frames - middle_frame).float()  # differences from median
+    # differences = frames_minus_median.mean(dim=[1, 2])
+    differences = quantile_per_frame(frames_minus_median, 0.9)
+    plot_differences(torch.Tensor(differences))
+
 def main():
     frames = load_raw_frames("example.Bin", FPS)
     middle_frame = frames[FPS//2]
-    # median = frames.median(dim=0)[0]
+
+    # save_histogram_equalized_video(frames, "all_frames.avi") # save all frames
+    # save_background_difference(frames, middle_frame, "differences.avi") # save difference from middle frame
+    see_differences(frames, middle_frame) # difference from middle frame
+
+    shifts = find_x_shifts_and_y_shifts(frames, middle_frame)
+    aligned_video = align_video(frames, shifts)
+    see_differences(aligned_video, middle_frame) # difference from middle frame
+
+    # save_background_difference(aligned_video, middle_frame, "aligned_differences.avi") # save difference from middle frame
+
+    # plot_lines([shifts[:, 0], shifts[:, 1]])
+    # exit()
     # show_frame(middle_frame)
-    save_background_difference_avi(frames, middle_frame, "differences.avi")
-    exit()
-    frames_minus_median = torch.abs(frames - middle_frame).float() # differences from median
-    differences = frames_minus_median.mean(dim=[1,2])
-    # plot_differences(differences)
+
+    # save_background_difference_avi(frames, middle_frame, "differences.avi") # save difference from middle frame
+    # see_differences(aligned_video, middle_frame)
     # differences_dft = fft_time_shift(differences)
-    plot_fft_spectrum(frames_minus_median)
-    # plot_line(differences_dft.abs())
-    # print(type(differences))
+    # plot_fft_spectrum(frames_minus_median)
+
 
 if __name__ == "__main__":
     main()
